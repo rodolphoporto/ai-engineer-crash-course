@@ -1,7 +1,7 @@
 import os
 import time
 import json
-from typing import List, Dict
+from typing import Generator, List, Dict
 import requests
 
 
@@ -31,18 +31,18 @@ class LLMClient:
 
         return formatted
 
-    def chat_blocking(
+    def chat_stream(
         self,
         messages: List[Dict],
         model: str = "phi-3.5-mini-instruct",
-    ) -> str:
-        """Send a blocking (non-streaming) chat completion request"""
+    ) -> Generator[str, None, None]:
+        """Send a streaming chat completion request"""
         formatted_prompt = self._format_phi_messages(messages)
 
         data = {
             "prompt": formatted_prompt,
             "model": model,
-            "stream": False,
+            "stream": True,
             "top_p": 0.1,
             "temperature": 0.3,
             "stop": ["<|endoftext|>", "<|end|>"],
@@ -50,25 +50,26 @@ class LLMClient:
             "presence_penalty": 0.0,
             "frequency_penalty": 0.0,
         }
+        with requests.post(
+            f"{self.api_base}/completions", headers=self.headers, json=data, stream=True
+        ) as response:
+            if response.status_code != 200:
+                raise Exception(f"Error: {response.text}")
 
-        start_time = time.time()
+            for line in response.iter_lines():
+                if line:
+                    line = line.decode("utf-8")
+                    if line.startswith("data:"):
+                        line = line[6:]
 
-        response = requests.post(
-            f"{self.api_base}/completions", headers=self.headers, json=data
-        )
-
-        if response.status_code != 200:
-            raise Exception(f"Error: {response.text}")
-
-        result = response.json()
-        elapsed_time = time.time() - start_time
-
-        if result.get("choices") and len(result["choices"]) > 0:
-            content = result["choices"][0].get("text", "")
-            print("Time taken:", elapsed_time)
-            return content
-
-        raise Exception("No valid response received from the API")
+                    if line == "[DONE]":
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                        if chunk.get("choices") and chunk["choices"][0].get("text"):
+                            yield chunk["choices"][0]["text"]
+                    except json.JSONDecodeError:
+                        continue
 
 
 def demonstrate_capabilities():
@@ -88,7 +89,7 @@ def demonstrate_capabilities():
             "messages": [
                 {
                     "role": "user",
-                    "content": "What is DevOps in one sentence?",
+                    "content": "What is DevOps?",
                 },
             ],
         },
@@ -98,8 +99,9 @@ def demonstrate_capabilities():
         print(f"\nExample: {example['title']}")
         print("Response:")
 
-        response = llm.chat_blocking(example["messages"])
-        print(response)
+        for token in llm.chat_stream(example["messages"]):
+            end_char = "\n" if token == " " else ""
+            print(token, end=end_char, flush=True)
 
 
 if __name__ == "__main__":
